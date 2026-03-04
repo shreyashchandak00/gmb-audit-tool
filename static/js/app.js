@@ -21,6 +21,23 @@ function isValidGoogleMapsUrl(url) {
            /goo\.gl\/maps\//i.test(url);
 }
 
+function normalizeGoogleMapsUrl(url) {
+    try {
+        const u = new URL(url);
+        const placeId =
+            u.searchParams.get('query_place_id') ||
+            u.searchParams.get('q_place_id') ||
+            u.searchParams.get('cid');
+
+        if (placeId) {
+            return `https://www.google.com/maps/place/?q=place_id:${placeId}`;
+        }
+    } catch (_) {
+        // Keep original URL if parsing fails
+    }
+    return url;
+}
+
 // Show/hide helpers
 function showError(msg) {
     errorMessage.textContent = msg;
@@ -162,6 +179,12 @@ form.addEventListener('submit', async (e) => {
         return;
     }
 
+    const normalizedUrl = normalizeGoogleMapsUrl(url);
+    if (normalizedUrl !== url) {
+        // Show users the exact URL shape being used for a more stable scrape.
+        urlInput.value = normalizedUrl;
+    }
+
     // Reset state
     errorMessage.style.display = 'none';
     resultsSection.style.display = 'none';
@@ -177,7 +200,7 @@ form.addEventListener('submit', async (e) => {
         const response = await fetch('/api/audit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
+            body: JSON.stringify({ url: normalizedUrl }),
         });
 
         const data = await response.json();
