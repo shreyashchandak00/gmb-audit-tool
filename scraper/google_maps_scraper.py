@@ -160,8 +160,9 @@ class GoogleMapsScraper:
         if normalized_url != url:
             logger.info(f"Normalized URL for scraping: {normalized_url}")
 
-        self.driver = create_driver()
         try:
+            self.driver = create_driver()
+
             # Load page
             progress_callback("Loading Google Maps page...", 10)
             try:
@@ -223,8 +224,12 @@ class GoogleMapsScraper:
         except Exception as exc:
             raise RuntimeError(self._friendly_error_message(exc)) from exc
         finally:
-            self.driver.quit()
-            self.driver = None
+            if self.driver is not None:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = None
 
     def _wait_for_page_ready(self):
         """Wait for either a business header or at least main map content."""
@@ -292,6 +297,11 @@ class GoogleMapsScraper:
 
         if isinstance(exc, WebDriverException):
             raw = str(exc).lower()
+            if raw.startswith('message: stacktrace') or 'stacktrace:' in raw:
+                return (
+                    "ChromeDriver failed to start a usable browser session on the server. "
+                    "Please retry in 1-2 minutes. If it continues, restart the Render service."
+                )
             if 'tab crashed' in raw or 'session deleted because of page crash' in raw:
                 return (
                     "Chrome crashed while loading this page on the server. "
