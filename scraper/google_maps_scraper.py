@@ -1,5 +1,7 @@
+import os
 import re
 import time
+import shutil
 import logging
 from typing import Optional, Callable
 
@@ -32,6 +34,11 @@ def validate_url(url: str) -> bool:
     return any(p.match(url) for p in GMAPS_URL_PATTERNS)
 
 
+def _is_docker() -> bool:
+    """Detect if running inside a Docker container."""
+    return os.path.exists('/.dockerenv') or os.environ.get('RENDER', '')
+
+
 def create_driver() -> webdriver.Chrome:
     options = Options()
     options.add_argument('--headless=new')
@@ -41,13 +48,46 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
     options.add_argument('--disable-blink-features=AutomationControlled')
+
+    # Extra stability flags for Docker/server environments
+    options.add_argument('--disable-extensions')
+    options.add_argument('--disable-software-rasterizer')
+    options.add_argument('--disable-setuid-sandbox')
+    options.add_argument('--remote-debugging-port=0')
+    options.add_argument('--disable-features=VizDisplayCompositor')
+    options.add_argument('--single-process')
+    options.add_argument('--disable-crash-reporter')
+    options.add_argument('--disable-background-networking')
+    options.add_argument('--dns-prefetch-disable')
+    options.add_argument('--no-first-run')
+    options.add_argument('--no-zygote')
+
     options.add_experimental_option('excludeSwitches', ['enable-automation'])
     options.add_experimental_option('useAutomationExtension', False)
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    # In Docker, use system-installed Chrome binary
+    if _is_docker():
+        chrome_path = shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+        if chrome_path:
+            options.binary_location = chrome_path
+            logger.info(f"Using system Chrome at: {chrome_path}")
+
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        logger.warning(f"ChromeDriverManager failed ({e}), trying system chromedriver...")
+        # Fallback: try system chromedriver directly
+        chromedriver_path = shutil.which('chromedriver')
+        if chromedriver_path:
+            service = Service(chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=options)
+        else:
+            # Last resort: let Selenium find it automatically
+            driver = webdriver.Chrome(options=options)
+
     driver.implicitly_wait(3)
-    driver.set_page_load_timeout(30)
+    driver.set_page_load_timeout(60)
     return driver
 
 
