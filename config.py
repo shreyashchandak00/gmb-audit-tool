@@ -37,7 +37,9 @@ GRADES = {
     'F': {'min': 0, 'label': 'Needs Work', 'color': '#ef4444'},
 }
 
+import os
+
 # Flask config
 REPORTS_DIR = 'reports'
 HOST = '0.0.0.0'
-PORT = 5000
+PORT = int(os.environ.get('PORT', 5000))
