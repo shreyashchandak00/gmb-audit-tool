@@ -24,13 +24,18 @@ function isValidGoogleMapsUrl(url) {
 function normalizeGoogleMapsUrl(url) {
     try {
         const u = new URL(url);
-        const placeId =
-            u.searchParams.get('query_place_id') ||
-            u.searchParams.get('q_place_id') ||
-            u.searchParams.get('cid');
+        const cid = u.searchParams.get('cid');
+        const hasQueryPlaceId =
+            u.searchParams.has('query_place_id') || u.searchParams.has('q_place_id');
 
-        if (placeId) {
-            return `https://www.google.com/maps/place/?q=place_id:${placeId}`;
+        // Keep query_place_id URLs as-is; auto-converting them can resolve to a wrong place.
+        if (hasQueryPlaceId) {
+            return url;
+        }
+
+        // cid links are more stable when converted.
+        if (cid) {
+            return `https://www.google.com/maps/place/?q=cid:${cid}`;
         }
     } catch (_) {
         // Keep original URL if parsing fails
@@ -95,8 +100,69 @@ function renderResults(result) {
     const websiteValue = document.getElementById('stat-website-value');
 
     ratingValue.textContent = result.rating ? result.rating.toFixed(1) : 'N/A';
-    reviewsValue.textContent = result.review_count;
-    photosValue.textContent = result.photos_count;
+    reviewsValue.textContent = Number.isFinite(result.review_count) ? result.review_count : 'N/A';
+    photosValue.textContent = Number.isFinite(result.photos_count) ? result.photos_count : 'N/A';
+    websiteValue.textContent = result.has_website ? 'Yes' : 'No';
+
+    // Color coding stats
+    const ratingCard = document.getElementById('stat-rating');
+    if (result.rating && result.rating >= 4.0) ratingCard.className = 'stat-card good';
+    else if (result.rating && result.rating >= 3.0) ratingCard.className = 'stat-card warning';
+    else ratingCard.className = 'stat-card bad';
+
+    const websiteCard = document.getElementById('stat-website');
+    websiteCard.className = result.has_website ? 'stat-card good' : 'stat-card bad';
+
+    // Issue count badge
+    const issueCount = document.getElementById('issue-count');
+    issueCount.textContent = result.total_issues;
+    issueCount.className = result.total_issues === 0 ? 'issue-count zero' : 'issue-count';
+
+    // Issues list
+    const issuesList = document.getElementById('issues-list');
+    issuesList.innerHTML = '';
+
+    if (result.issues.length === 0) {
+        issuesList.innerHTML = '<p style="color: var(--success); text-align: center; padding: 20px;">No issues found! Your profile looks great.</p>';
+    } else {
+        result.issues.forEach(issue => {
+            const item = document.createElement('div');
+            item.className = 'issue-item ' + issue.severity;
+            item.innerHTML = `
+                <div class="issue-header">
+                    <span class="issue-title">${escapeHtml(issue.title)}</span>
+                    <span class="severity-badge ${issue.severity}">${issue.severity}</span>
+                </div>
+                <p class="issue-description">${escapeHtml(issue.description)}</p>
+                <div class="issue-recommendation">
+                    <strong>Recommendation:</strong>
+                    ${escapeHtml(issue.recommendation)}
+                </div>
+            `;
+            issuesList.appendChild(item);
+        });
+    }
+
+    // Show results section
+    resultsSection.style.display = 'block';
+    resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function animateNumber(element, start, end, duration) {
+    const range = end - start;
+    const startTime = performance.now();
+
+    function step(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        // Ease out cubic
+        const eased = 1 - Math.pow(1 - progress, 3);
+        element.textContent = Math.round(start + range * eased);
+        if (progress < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+}
+
     websiteValue.textContent = result.has_website ? 'Yes' : 'No';
 
     // Color coding stats
@@ -164,23 +230,69 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Additional elements for Apify
+const useApifyCheckbox = document.getElementById('use-apify-data');
+const apifyContainer = document.getElementById('apify-container');
+const apifyDataInput = document.getElementById('apify-data-input');
+const urlHint = document.getElementById('url-hint');
+
+useApifyCheckbox.addEventListener('change', (e) => {
+    if (e.target.checked) {
+        apifyContainer.style.display = 'block';
+        urlInput.placeholder = "Optional: Paste mapped URL here...";
+        urlInput.required = false;
+        urlHint.style.display = 'none';
+        apifyDataInput.required = true;
+    } else {
+        apifyContainer.style.display = 'none';
+        urlInput.placeholder = "Paste your Google Maps business URL here...";
+        urlInput.required = true;
+        urlHint.style.display = 'block';
+        apifyDataInput.required = false;
+    }
+});
+
 // Form submission
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const url = urlInput.value.trim();
+    
+    let payloadStr = '{}';
+    let apifyData = null;
 
-    if (!url) {
-        showError('Please enter a Google Maps URL');
-        return;
+    if (useApifyCheckbox.checked) {
+        const rawJson = apifyDataInput.value.trim();
+        if (!rawJson) {
+            showError('Please paste your Apify JSON data');
+            return;
+        }
+        try {
+            apifyData = JSON.parse(rawJson);
+            // If it's an array from Apify, process the first item
+            if (Array.isArray(apifyData) && apifyData.length > 0) {
+                apifyData = apifyData[0];
+            } else if (Array.isArray(apifyData)) {
+                showError('Apify JSON array is empty');
+                return;
+            }
+        } catch (err) {
+            showError('Invalid JSON format. Please check the data you pasted.');
+            return;
+        }
+    } else {
+        if (!url) {
+            showError('Please enter a Google Maps URL');
+            return;
+        }
+
+        if (!isValidGoogleMapsUrl(url)) {
+            showError('Please enter a valid Google Maps business URL (e.g., https://www.google.com/maps/place/...)');
+            return;
+        }
     }
 
-    if (!isValidGoogleMapsUrl(url)) {
-        showError('Please enter a valid Google Maps business URL (e.g., https://www.google.com/maps/place/...)');
-        return;
-    }
-
-    const normalizedUrl = normalizeGoogleMapsUrl(url);
-    if (normalizedUrl !== url) {
+    const normalizedUrl = url ? normalizeGoogleMapsUrl(url) : '';
+    if (normalizedUrl !== url && !useApifyCheckbox.checked) {
         // Show users the exact URL shape being used for a more stable scrape.
         urlInput.value = normalizedUrl;
     }
@@ -196,11 +308,15 @@ form.addEventListener('submit', async (e) => {
     progressSection.scrollIntoView({ behavior: 'smooth' });
 
     try {
+        const requestPayload = apifyData 
+            ? { url: normalizedUrl || apifyData.url || '', apify_data: apifyData }
+            : { url: normalizedUrl };
+
         // Start audit
         const response = await fetch('/api/audit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: normalizedUrl }),
+            body: JSON.stringify(requestPayload),
         });
 
         const data = await response.json();

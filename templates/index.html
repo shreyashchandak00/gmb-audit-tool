@@ -32,14 +32,22 @@
                         required
                         autocomplete="off"
                     >
-                    <button type="submit" id="submit-btn">
+                    <button type="submit" id="submit-btn" style="min-width: 140px;">
                         <span class="btn-text">Audit Now</span>
                         <span class="btn-loader" style="display:none;">
                             <span class="spinner"></span>
                         </span>
                     </button>
                 </div>
-                <p class="input-hint">Example: https://www.google.com/maps/place/Your+Business+Name/...</p>
+                <div class="apify-toggle" style="margin-top: 15px; text-align: left; padding-left: 5px;">
+                    <label style="cursor: pointer; color: var(--text-muted); font-size: 0.9em; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="use-apify-data"> I already have Apify JSON data
+                    </label>
+                </div>
+                <div id="apify-container" style="display: none; margin-top: 15px;">
+                    <textarea id="apify-data-input" placeholder="Paste your Apify JSON output here...&#10;&#10;[{&#10;  &quot;title&quot;: &quot;Business Name&quot;,&#10;  &quot;rating&quot;: 4.5,&#10;  ...&#10;}]" rows="8" style="width: 100%; border-radius: 8px; border: 1px solid var(--border); padding: 15px; font-family: monospace; resize: vertical; max-height: 400px;"></textarea>
+                </div>
+                <p class="input-hint" id="url-hint">Example: https://www.google.com/maps/place/Your+Business+Name/...</p>
                 <div id="error-message" class="error-message" style="display:none;"></div>
             </form>
         </section>

@@ -20,7 +20,6 @@ app = Flask(__name__)
 # In-memory task store
 tasks = {}
 
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -29,12 +28,18 @@ def index():
 @app.route('/api/audit', methods=['POST'])
 def start_audit():
     data = request.get_json()
-    if not data or 'url' not in data:
-        return jsonify({'error': 'URL is required'}), 400
+    if not data:
+        return jsonify({'error': 'Data is required'}), 400
 
-    url = data['url'].strip()
-    if not validate_url(url):
-        return jsonify({'error': 'Please enter a valid Google Maps business URL'}), 400
+    url = data.get('url', '').strip()
+    apify_data = data.get('apify_data')
+
+    if not url and not apify_data:
+        return jsonify({'error': 'URL or Apify data is required'}), 400
+
+    if url and not apify_data:
+        if not validate_url(url):
+            return jsonify({'error': 'Please enter a valid Google Maps business URL'}), 400
 
     task_id = str(uuid.uuid4())
     q = Queue()
@@ -46,7 +51,7 @@ def start_audit():
     }
 
     thread = threading.Thread(
-        target=_run_audit_task, args=(task_id, url, q), daemon=True
+        target=_run_audit_task, args=(task_id, url, apify_data, q), daemon=True
     )
     thread.start()
 
@@ -54,7 +59,7 @@ def start_audit():
 
 
 @app.route('/api/progress/<task_id>')
-def progress(task_id):
+def stream_progress(task_id):
     if task_id not in tasks:
         return jsonify({'error': 'Task not found'}), 404
 
@@ -73,7 +78,6 @@ def progress(task_id):
         headers={
             'Cache-Control': 'no-cache',
             'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive',
         }
     )
 
@@ -102,11 +106,8 @@ def download(task_id):
     )
 
 
-def _run_audit_task(task_id: str, url: str, queue: Queue):
+def _run_audit_task(task_id: str, url: str, apify_data: dict, queue: Queue):
     try:
-        # Step 1: Scrape
-        scraper = GoogleMapsScraper()
-
         def progress_cb(message, percent):
             queue.put(json.dumps({
                 'status': 'scraping',
@@ -114,7 +115,49 @@ def _run_audit_task(task_id: str, url: str, queue: Queue):
                 'percent': int(percent * 0.7),  # Scraping = 0-70%
             }))
 
-        profile = scraper.scrape(url, progress_callback=progress_cb)
+        if apify_data:
+            # Bypass scraping, generate BusinessProfile directly from Apify JSON
+            queue.put(json.dumps({
+                'status': 'scraping',
+                'message': 'Parsing Apify data...',
+                'percent': 70,
+            }))
+            
+            from scraper.data_models import BusinessProfile, BusinessHours
+            
+            # Accommodate typical Apify output schema (like compass/google-maps-scraper)
+            img_urls = apify_data.get('imageUrls', [])
+            photos_count = apify_data.get('photosCount')
+            if photos_count is None and img_urls:
+                photos_count = len(img_urls)
+                
+            profile = BusinessProfile(
+                url=url or apify_data.get('url', 'https://google.com/maps'),
+                name=apify_data.get('title') or apify_data.get('name'),
+                address=apify_data.get('address'),
+                phone=apify_data.get('phone') or apify_data.get('phoneUnformatted'),
+                website=apify_data.get('website'),
+                category=apify_data.get('categoryName') or apify_data.get('category'),
+                rating=apify_data.get('totalScore') or apify_data.get('rating'),
+                review_count=apify_data.get('reviewsCount'),
+                photos_count=photos_count,
+                description=apify_data.get('description'),
+            )
+            
+            hours_data = apify_data.get('openingHours')
+            if hours_data:
+                if hasattr(hours_data, 'items'): # dict
+                    for day, hours in hours_data.items():
+                        profile.hours.append(BusinessHours(day=day, hours=hours))
+                elif isinstance(hours_data, list):
+                    for h in hours_data:
+                        if isinstance(h, dict) and 'day' in h and 'hours' in h:
+                            profile.hours.append(BusinessHours(day=h['day'], hours=h['hours']))
+
+        else:
+            # Step 1: Scrape
+            scraper = GoogleMapsScraper()
+            profile = scraper.scrape(url, progress_callback=progress_cb)
 
         # Step 2: Analyze
         queue.put(json.dumps({
@@ -153,8 +196,8 @@ def _run_audit_task(task_id: str, url: str, queue: Queue):
             'warning_count': audit_result.warning_count,
             'info_count': audit_result.info_count,
             'rating': profile.rating,
-            'review_count': profile.review_count or 0,
-            'photos_count': profile.photos_count or 0,
+            'review_count': profile.review_count,
+            'photos_count': profile.photos_count,
             'has_website': bool(profile.website),
             'has_hours': bool(profile.hours),
             'has_description': bool(profile.description),
