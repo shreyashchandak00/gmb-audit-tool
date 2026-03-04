@@ -45,24 +45,53 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920,1080')
     options.add_argument('--lang=en-US')
     options.add_argument('--disable-blink-features=AutomationControlled')
 
-    # Extra stability flags for Docker/server environments
+    # ── Memory-saving flags (critical for 512 MB Render free tier) ──
+    options.add_argument('--window-size=1280,720')
+    options.add_argument('--single-process')
+    options.add_argument('--no-zygote')
+    options.add_argument('--no-first-run')
     options.add_argument('--disable-extensions')
     options.add_argument('--disable-software-rasterizer')
     options.add_argument('--disable-setuid-sandbox')
-    options.add_argument('--remote-debugging-port=0')
-    options.add_argument('--disable-features=VizDisplayCompositor')
-    options.add_argument('--single-process')
     options.add_argument('--disable-crash-reporter')
     options.add_argument('--disable-background-networking')
     options.add_argument('--dns-prefetch-disable')
-    options.add_argument('--no-first-run')
-    options.add_argument('--no-zygote')
+    options.add_argument('--remote-debugging-port=0')
 
-    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    # Aggressive memory reduction
+    options.add_argument('--disable-features=VizDisplayCompositor,TranslateUI')
+    options.add_argument('--disable-default-apps')
+    options.add_argument('--disable-hang-monitor')
+    options.add_argument('--disable-popup-blocking')
+    options.add_argument('--disable-prompt-on-repost')
+    options.add_argument('--disable-sync')
+    options.add_argument('--disable-translate')
+    options.add_argument('--metrics-recording-only')
+    options.add_argument('--safebrowsing-disable-auto-update')
+    options.add_argument('--disable-component-update')
+    options.add_argument('--disable-domain-reliability')
+    options.add_argument('--disable-client-side-phishing-detection')
+    options.add_argument('--disable-ipc-flooding-protection')
+    options.add_argument('--disable-renderer-backgrounding')
+    options.add_argument('--disable-backgrounding-occluded-windows')
+    options.add_argument('--disable-breakpad')
+    options.add_argument('--disable-logging')
+    options.add_argument('--js-flags=--max-old-space-size=128')
+    options.add_argument('--renderer-process-limit=1')
+    options.add_argument('--memory-pressure-off')
+
+    # Disable loading images to save bandwidth + memory
+    prefs = {
+        'profile.managed_default_content_settings.images': 2,
+        'profile.default_content_setting_values.notifications': 2,
+        'profile.managed_default_content_settings.stylesheets': 1,
+        'profile.managed_default_content_settings.plugins': 2,
+    }
+    options.add_experimental_option('prefs', prefs)
+    options.add_experimental_option('excludeSwitches', ['enable-automation', 'enable-logging'])
     options.add_experimental_option('useAutomationExtension', False)
 
     # In Docker, use system-installed Chrome binary
@@ -77,13 +106,11 @@ def create_driver() -> webdriver.Chrome:
         driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
         logger.warning(f"ChromeDriverManager failed ({e}), trying system chromedriver...")
-        # Fallback: try system chromedriver directly
         chromedriver_path = shutil.which('chromedriver')
         if chromedriver_path:
             service = Service(chromedriver_path)
             driver = webdriver.Chrome(service=service, options=options)
         else:
-            # Last resort: let Selenium find it automatically
             driver = webdriver.Chrome(options=options)
 
     driver.implicitly_wait(3)
