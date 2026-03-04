@@ -3,6 +3,7 @@ import re
 import time
 import shutil
 import logging
+from urllib.parse import urlparse, parse_qs
 from typing import Optional, Callable
 
 from selenium import webdriver
@@ -12,7 +13,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException, ElementClickInterceptedException
+    TimeoutException, NoSuchElementException, ElementClickInterceptedException, WebDriverException
 )
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -34,6 +35,24 @@ def validate_url(url: str) -> bool:
     return any(p.match(url) for p in GMAPS_URL_PATTERNS)
 
 
+def normalize_maps_url(url: str) -> str:
+    """
+    Normalize Google Maps URLs to a stable place profile URL when possible.
+    Example:
+    /maps/search/?api=1&query=...&query_place_id=XYZ -> /maps/place/?q=place_id:XYZ
+    """
+    try:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        place_ids = query.get('query_place_id') or query.get('q_place_id') or query.get('cid')
+        if place_ids and place_ids[0]:
+            place_id = place_ids[0].strip()
+            return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+    except Exception:
+        pass
+    return url
+
+
 def _is_docker() -> bool:
     """Detect if running inside a Docker container."""
     return os.path.exists('/.dockerenv') or os.environ.get('RENDER', '')
@@ -48,10 +67,8 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument('--lang=en-US')
     options.add_argument('--disable-blink-features=AutomationControlled')
 
-    # ── Memory-saving flags (critical for 512 MB Render free tier) ──
+    # Memory-saving flags for constrained hosts (Render free tier, etc.)
     options.add_argument('--window-size=1280,720')
-    options.add_argument('--single-process')
-    options.add_argument('--no-zygote')
     options.add_argument('--no-first-run')
     options.add_argument('--disable-extensions')
     options.add_argument('--disable-software-rasterizer')
@@ -59,7 +76,7 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument('--disable-crash-reporter')
     options.add_argument('--disable-background-networking')
     options.add_argument('--dns-prefetch-disable')
-    options.add_argument('--remote-debugging-port=0')
+    options.add_argument('--remote-debugging-port=9222')
 
     # Aggressive memory reduction
     options.add_argument('--disable-features=VizDisplayCompositor,TranslateUI')
@@ -101,17 +118,29 @@ def create_driver() -> webdriver.Chrome:
             options.binary_location = chrome_path
             logger.info(f"Using system Chrome at: {chrome_path}")
 
-    try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception as e:
-        logger.warning(f"ChromeDriverManager failed ({e}), trying system chromedriver...")
-        chromedriver_path = shutil.which('chromedriver')
+    # Prefer system chromedriver in containers. webdriver-manager is less reliable on PaaS.
+    if _is_docker():
+        chromedriver_path = os.environ.get('CHROMEDRIVER_PATH') or shutil.which('chromedriver')
         if chromedriver_path:
+            logger.info(f"Using system ChromeDriver at: {chromedriver_path}")
             service = Service(chromedriver_path)
             driver = webdriver.Chrome(service=service, options=options)
         else:
-            driver = webdriver.Chrome(options=options)
+            logger.warning("System chromedriver not found; falling back to webdriver-manager")
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+    else:
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+        except Exception as e:
+            logger.warning(f"ChromeDriverManager failed ({e}), trying system chromedriver...")
+            chromedriver_path = shutil.which('chromedriver')
+            if chromedriver_path:
+                service = Service(chromedriver_path)
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                driver = webdriver.Chrome(options=options)
 
     driver.implicitly_wait(3)
     driver.set_page_load_timeout(60)
@@ -127,27 +156,24 @@ class GoogleMapsScraper:
         if not progress_callback:
             progress_callback = lambda msg, pct: None
 
+        normalized_url = normalize_maps_url(url)
+        if normalized_url != url:
+            logger.info(f"Normalized URL for scraping: {normalized_url}")
+
         self.driver = create_driver()
         try:
             # Load page
             progress_callback("Loading Google Maps page...", 10)
-            self.driver.get(url)
-            time.sleep(3)
-
-            # Wait for main content
             try:
-                WebDriverWait(self.driver, 15).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="main"] h1'))
-                )
+                self.driver.get(normalized_url)
             except TimeoutException:
-                # Try alternate wait
-                WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'h1'))
-                )
+                # On slow hosts, continue with partially loaded page.
+                logger.warning("Page load timed out; continuing with partially loaded DOM")
+            time.sleep(2)
 
             # Dismiss consent banner if present
             self._dismiss_consent()
-            time.sleep(1)
+            self._wait_for_page_ready()
 
             # Extract basic info
             progress_callback("Extracting business information...", 25)
@@ -181,7 +207,7 @@ class GoogleMapsScraper:
             progress_callback("Data extraction complete!", 100)
 
             return BusinessProfile(
-                url=url,
+                url=normalized_url,
                 name=name,
                 address=address,
                 phone=phone,
@@ -194,9 +220,93 @@ class GoogleMapsScraper:
                 description=description,
                 owner_response_ratio=owner_response_ratio,
             )
+        except Exception as exc:
+            raise RuntimeError(self._friendly_error_message(exc)) from exc
         finally:
             self.driver.quit()
             self.driver = None
+
+    def _wait_for_page_ready(self):
+        """Wait for either a business header or at least main map content."""
+        try:
+            WebDriverWait(self.driver, 20).until(
+                lambda d: (
+                    bool(d.find_elements(By.CSS_SELECTOR, 'h1.DUwDvf, div[role="main"] h1')) or
+                    bool(d.find_elements(By.CSS_SELECTOR, 'div[role="main"]')) or
+                    self._is_blocked_or_consent_page()
+                )
+            )
+        except TimeoutException:
+            if self._is_blocked_or_consent_page():
+                return
+            raise
+
+        # Some regions redirect to consent pages before maps content is visible.
+        if self._is_consent_page():
+            self._dismiss_consent()
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: bool(d.find_elements(By.CSS_SELECTOR, 'h1.DUwDvf, div[role="main"] h1'))
+                )
+            except TimeoutException:
+                pass
+
+        if self._is_blocked_page():
+            raise RuntimeError(
+                "Google blocked this automated request (consent/captcha/traffic check). "
+                "Try again later with a direct Google Maps place URL."
+            )
+
+    def _is_consent_page(self) -> bool:
+        url = (self.driver.current_url or '').lower()
+        if 'consent.google' in url:
+            return True
+        title = (self.driver.title or '').lower()
+        return 'before you continue' in title or 'consent' in title
+
+    def _is_blocked_page(self) -> bool:
+        body = (self.driver.page_source or '').lower()
+        patterns = (
+            'unusual traffic',
+            'our systems have detected unusual traffic',
+            '/sorry/index',
+            'detected unusual traffic',
+            'captcha',
+            'recaptcha',
+        )
+        return any(p in body for p in patterns)
+
+    def _is_blocked_or_consent_page(self) -> bool:
+        return self._is_consent_page() or self._is_blocked_page()
+
+    def _friendly_error_message(self, exc: Exception) -> str:
+        """Convert Selenium-level failures into actionable user-facing errors."""
+        direct_place_hint = (
+            "Use a direct business URL like https://www.google.com/maps/place/Business-Name/..."
+        )
+        if isinstance(exc, TimeoutException):
+            return (
+                "Timed out while loading Google Maps. The page may be blocked, too slow, "
+                f"or not a direct business profile URL. {direct_place_hint}"
+            )
+
+        if isinstance(exc, WebDriverException):
+            raw = str(exc).lower()
+            if 'tab crashed' in raw or 'session deleted because of page crash' in raw:
+                return (
+                    "Chrome crashed while loading this page on the server. "
+                    "Please retry in a minute with a direct business profile URL."
+                )
+            if 'disconnected' in raw or 'unable to discover open pages' in raw:
+                return (
+                    "Browser session disconnected while loading Google Maps. "
+                    "Please retry. If it persists, use a direct /maps/place URL."
+                )
+            if 'chrome not reachable' in raw:
+                return "Chrome became unreachable while scraping. Please retry in a minute."
+
+        # If Selenium gives only stacktrace internals, avoid returning noisy internals.
+        return f"Could not load this Google Maps profile for scraping. {direct_place_hint}"
 
     def _dismiss_consent(self):
         """Dismiss cookie consent banner if present."""
